@@ -540,6 +540,9 @@ def main():
                     
                     fullpath = os.path.join(root, file)
                     key_name = cloud_path + get_key_name(fullpath, path)
+                    if not os.path.exists(fullpath):
+                        continue
+
                     file_size = os.path.getsize(fullpath)
                     
                     if file_size == 0:
