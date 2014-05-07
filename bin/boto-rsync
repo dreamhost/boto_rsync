@@ -1153,4 +1153,6 @@ def main():
                             key.delete()
 
 if __name__ == "__main__":
+    reload(sys)  # need to get setdefaultencoding back
+    sys.setdefaultencoding('utf-8')
     main()
