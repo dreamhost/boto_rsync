@@ -21,11 +21,31 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 #
-import sys, os, time, datetime, argparse, threading, signal
+from __future__ import with_statement # for Python 2.5
+import sys, os, time, datetime, argparse, threading, signal, math
 from fnmatch import fnmatch
+from contextlib import closing
+from cStringIO import StringIO
 import boto
 
-__version__ = '0.8.1'
+try:
+    # Python >= 2.6
+    import multiprocessing as mp
+    from multiprocessing.pool import IMapIterator
+
+    # IMapIterator fix adapted from gist.github.com/626518
+    # Without this, KeyboardInterrupt turns children into zombies
+    def wrapper(func):
+        def wrap(self, timeout=None):
+            return func(self,
+                        timeout=timeout if timeout is not None else 1e100)
+        return wrap
+    IMapIterator.next = wrapper(IMapIterator.next)
+except ImportError:
+    # Python < 2.6
+    mp = None
+
+__version__ = '0.8.1+DH'
 
 version= """
 %(prog)s v%(version)s
@@ -171,6 +191,151 @@ def signal_handler(signum, frame):
         sys.stdout.write('\n')
         sys.exit(0)
 
+def s3_upload(
+        key, fullpath, size,
+        cb, num_cb,
+        policy, reduced_redundancy, encrypt_key,
+        chunk_size=20, mpu_threshold=50, workers=10):
+    """Upload to S3 normally or with multipart upload, as appropriate."""
+    if size < mpu_threshold:
+        # Normal upload
+        key.set_contents_from_filename(
+            fullpath, cb=cb, num_cb=num_cb,
+            policy=policy, reduced_redundancy=reduced_redundancy,
+            encrypt_key=encrypt_key
+            )
+        return key.size
+
+    if size / (chunk_size * 1.0) > 10000:
+        # If we would end up with more than 10k parts, come up with a
+        # better chunk size, and round up to the nearest MB
+        better_chunk_size_mb = max(
+            math.ceil((size * 1.0) / 10000 / 1024 ** 2), 5)
+        chunk_size = int(better_chunk_size_mb * 1024 ** 2)
+
+    b = key.bucket
+    # start a multipart upload
+    try:
+        mpu = b.initiate_multipart_upload(
+            key_name=key.name,
+            reduced_redundancy=reduced_redundancy,
+            encrypt_key=encrypt_key,
+            policy=policy
+            )
+    except TypeError: # boto < 2.4.0 didn't have policy here
+        acl_header = b.connection.provider.acl_header
+        mpu = b.initiate_multipart_upload(
+            key_name=key.name,
+            headers={acl_header: policy},
+            reduced_redundancy=reduced_redundancy,
+            encrypt_key=encrypt_key
+            )
+
+    # make tasks for multipart upload parts
+    tasks = generate_upload_tasks(
+        key=key, fullpath=fullpath, size=size,
+        chunk_size=chunk_size
+        )
+
+    # do it
+    uploaded_size = 0
+    conn = b.connection
+    cb(0, size)
+    try:
+        if mp is not None:
+            # if we have multiprocessing, do the upload in parallel
+            conn_args = {
+                "aws_access_key_id": conn.aws_access_key_id,
+                "aws_secret_access_key": conn.aws_secret_access_key,
+                "host": conn.host,
+                "is_secure": conn.is_secure,
+                "port": conn.port,
+                "debug": conn.debug,
+                }
+
+            P = mp.Pool(
+                processes=workers,
+                initializer=prep_worker,
+                initargs=(conn_args, mpu.id, b.name, key.name)
+                )
+            result_iterator = P.imap_unordered(upload_part, tasks)
+        else:
+            prep_worker(conn=conn, mpu=mpu)
+            result_iterator = (upload_part(task) for task in tasks)
+
+        for result in result_iterator:
+            uploaded_size += result
+            cb(uploaded_size, size) # multipart uploads will disregard num_cb
+
+    # finish or abort
+    except:
+        if mp is not None:
+            P.terminate()
+        sys.stdout.write("\nABORTING MULTIPART UPLOAD...\n")
+        mpu.cancel_upload()
+        sys.stdout.write("\nMULTIPART UPLOAD ABORTED\n")
+        raise
+    else:
+        mpu.complete_upload()
+
+    return uploaded_size
+
+
+def prep_worker(
+        conn_args=None, mpu_id=None, bucketname=None, keyname=None,
+        conn=None, mpu=None):
+    """Set up a boto connection and a multipart upload object for a worker."""
+    # get a new boto connection
+    global worker_conn  # global so it will work with multiprocessing
+    worker_conn = boto.connect_s3(**conn_args) if conn is None else conn
+
+    # get the mpu object
+    global worker_mpu
+    if mpu is not None:
+        worker_mpu = mpu
+    else:
+        bucket = worker_conn.get_bucket(bucketname)
+        worker_mpu = boto.s3.multipart.MultiPartUpload(bucket)
+        worker_mpu.key_name = keyname
+        worker_mpu.id = mpu_id
+
+
+def generate_upload_tasks(key, fullpath, size, chunk_size):
+    """A generator for making tasks to representing parts."""
+    remaining = size
+    part_num = 0
+    offset = 0
+    while remaining > 0:
+        part_num += 1
+        yield (part_num, fullpath, offset, chunk_size)
+        offset += chunk_size
+        remaining -= chunk_size
+
+
+# run this as the multiprocessed task
+def upload_part(args):
+    """Upload an individual multipart upload part."""
+    # multiprocessing will only pass in one arg
+    part_num, filename, offset, size = args
+
+    # prep_worker needs to have been run within this process
+    global worker_mpu
+
+    # read from the right part of the file into a StringIO
+    partfile = StringIO()
+    with closing(open(filename, mode="rb")) as f:
+        f.seek(offset)
+        partfile.write(f.read(size))
+
+    partfile.seek(0)
+
+    worker_mpu.upload_part_from_file(partfile, part_num)
+
+    # return the actual uploaded size, cStringIO has no len method
+    partfile.seek(0, os.SEEK_END)
+    return partfile.tell()
+
+
 def main():
     global speeds, ev
     
@@ -233,6 +398,29 @@ def main():
         '-e', '--encrypt-keys', dest='encrypt', action='store_true',
         help='Enable server-side encryption on files copied to S3 (only ' + \
              'applies when S3 is the destination).'
+        )
+    parser.add_argument(
+        '--chunk-size', metavar='MB', default=20,
+        type=int,
+        help=(
+            'The size in MB that will be used for multipart upload parts. '
+            '(Minimum 5MB, Maximum 5120MB).'
+            )
+        )
+    parser.add_argument(
+        '--mpu-threshold', metavar='MB', default=50,
+        type=int,
+        help=(
+            'The size at which s3 uploading switches over to multipart upload.'
+            )
+        )
+    parser.add_argument(
+        '--workers', metavar='N', default=10,
+        type=int,
+        help=(
+            'If multiprocessing is available, the number of workers to have '
+            'in the multiprocessing process pool.'
+            )
         )
     parser.add_argument(
         '-p', '--preserve-acl', dest='preserve', action='store_true',
@@ -319,6 +507,9 @@ def main():
             metadata = dict([meta.split(': ', 1) for meta in metadata])
         reduced = args.reduced
         encrypt = args.encrypt
+        chunk_size = int(args.chunk_size) * 1024 ** 2
+        mpu_threshold = int(args.mpu_threshold) * 1024 ** 2
+        workers = int(args.workers)
         preserve = args.preserve
         no_overwrite = args.no_overwrite
         glob = args.glob
@@ -398,6 +589,10 @@ def main():
             usage(parser)
         elif not cloud_bucket or len(cloud_bucket) < 3:
             sys.stdout.write('\nERROR: Bucket name is invalid\n\n')
+            usage(parser)
+        elif not (5 * 1024 ** 2) <= chunk_size <= (5 * 1024 ** 3):
+            sys.stdout.write('\nERROR: Chunk size %dB is invalid\n\n' %
+                             chunk_size)
             usage(parser)
     elif xfer_type in ['sync']:
         if not cloud_bucket or len(cloud_bucket) < 3 and \
@@ -589,10 +784,14 @@ def main():
                                 fullpath, cb=cb, num_cb=num_cb, policy=grant
                                 )
                         else:
-                            k.set_contents_from_filename(
-                                fullpath, cb=cb, num_cb=num_cb,
+                            s3_upload(
+                                k, fullpath, file_size,
+                                cb=cb, num_cb=num_cb,
                                 policy=grant, reduced_redundancy=reduced,
-                                encrypt_key=encrypt
+                                encrypt_key=encrypt,
+                                chunk_size=chunk_size,
+                                mpu_threshold=mpu_threshold,
+                                workers=workers
                                 )
                         keys[key_name] = file_size
                         
@@ -701,9 +900,13 @@ def main():
                             path, cb=cb, num_cb=num_cb, policy=grant
                             )
                     else:
-                        k.set_contents_from_filename(
-                            path, cb=cb, num_cb=num_cb, policy=grant,
-                            reduced_redundancy=reduced, encrypt_key=encrypt
+                        s3_upload(
+                            k, path, file_size,
+                            cb=cb, num_cb=num_cb,
+                            policy=grant, reduced_redundancy=reduced,
+                            encrypt_key=encrypt,
+                            chunk_size=chunk_size, mpu_threshold=mpu_threshold,
+                            workers=workers
                             )
                     
                     # Clean stdout
