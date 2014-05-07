@@ -66,6 +66,13 @@ examples:
  or
     boto-rsync [OPTIONS] s3://bucketname/ s3://another_bucket/
 """
+# Translation dictionary for use in clean_key_name, generated here to avoid
+# regeneration per-object.
+# Maps non-printable characters to control sequences,
+# for example \x08 becomes ^H
+trdict = dict(
+    [(i, u'^' + unichr(64 + i)) for i in range(0, 32)] + [(127, u'^?')]
+    )
 
 def usage(parser):
     """Prints the usage string and exits."""
@@ -179,6 +186,20 @@ def get_key_name(fullpath, prefix):
     l = key_name.split(os.sep)
     key_name = '/'.join(l)
     return key_name.lstrip('/')
+
+def clean_key_name(keyname):
+    """Make a unicode, scrubbed version of keyname, removing non-printables."""
+    ukeyname = keyname.decode('utf-8')
+
+    clean = ukeyname.translate(trdict)
+
+    if (ukeyname != clean):
+        sys.stdout.write(
+            "\nWARNING: Non-Printable characters - changing %s => %s\n" %
+            (ukeyname, clean)
+            )
+
+    return clean
 
 def signal_handler(signum, frame):
     """Handles signals."""
@@ -679,7 +700,7 @@ def main():
                     else:
                         key_name = cloud_path + get_key_name(root, path) + '/'
                     
-                    key_name = key_name.decode('utf-8')
+                    key_name = clean_key_name(key_name)
 
                     if ignore_empty and not files:
                         if not quiet:
@@ -736,7 +757,9 @@ def main():
                         continue
                     
                     fullpath = os.path.join(root, file)
-                    key_name = (cloud_path + get_key_name(fullpath, path)).decode('utf-8')
+                    key_name = cloud_path + get_key_name(fullpath, path)
+                    key_name = clean_key_name(key_name)
+
                     if not os.path.exists(fullpath):
                         continue
 
@@ -811,7 +834,7 @@ def main():
                     for file in files:
                         fullpath = os.path.join(root, file)
                         key_name = cloud_path + get_key_name(fullpath, path)
-                        key_name = key_name.decode('utf-8')
+                        key_name = clean_key_name(key_name)
                         if key_name in keys:
                             del(keys[key_name])
                     
@@ -823,7 +846,7 @@ def main():
                             key_name = cloud_path + get_key_name(root, path) + \
                                        '/'
                         
-                        key_name = key_name.decode('utf-8')
+                        key_name = clean_key_name(key_name)
                         if key_name in keys:
                             del(keys[key_name])
                 
