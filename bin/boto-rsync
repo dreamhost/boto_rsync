@@ -392,7 +392,7 @@ def main():
              'with others\' buckets that have a global read/write ACL.'
         )
     parser.add_argument(
-        '--endpoint', metavar='HOST', default='s3.amazonaws.com',
+        '--endpoint', metavar='HOST', default='objects.dreamhost.com',
         help='Specify a specific S3 endpoint to connect to via boto\'s ' + \
              '"host" connection argument (S3 only).'
         )
