@@ -245,10 +245,13 @@ def s3_upload(
             policy=policy
             )
     except TypeError: # boto < 2.4.0 didn't have policy here
-        acl_header = b.connection.provider.acl_header
+        headers = None
+        if policy is not None:
+            acl_header = b.connection.provider.acl_header
+            headers = {acl_header: policy}
         mpu = b.initiate_multipart_upload(
             key_name=key.name,
-            headers={acl_header: policy},
+            headers=headers,
             reduced_redundancy=reduced_redundancy,
             encrypt_key=encrypt_key
             )
