@@ -190,7 +190,12 @@ def get_key_name(fullpath, prefix):
 
 def clean_key_name(keyname):
     """Make a unicode, scrubbed version of keyname, removing non-printables."""
-    ukeyname = keyname.decode('utf-8')
+    try:
+        ukeyname = keyname.decode('utf-8')
+    except UnicodeDecodeError:
+        # If the bytes found are invalid utf-8, chances are they're latin-1.
+        # At the very least, they should be decodable as latin-1.
+        ukeyname = keyname.decode('latin-1')
 
     clean = ukeyname.translate(trdict)
 
