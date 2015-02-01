@@ -301,11 +301,15 @@ def s3_upload(
     except:
         if mp is not None:
             P.terminate()
+            P.join()
         sys.stdout.write("\nABORTING MULTIPART UPLOAD...\n")
         mpu.cancel_upload()
         sys.stdout.write("\nMULTIPART UPLOAD ABORTED\n")
         raise
     else:
+        if mp is not None:
+            P.close()
+            P.join()
         mpu.complete_upload()
 
     return uploaded_size
