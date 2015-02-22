@@ -222,7 +222,7 @@ def s3_upload(
         key, fullpath, size,
         cb, num_cb,
         policy, reduced_redundancy, encrypt_key,
-        chunk_size=20, mpu_threshold=50, workers=10):
+        chunk_size=20, mpu_threshold=50, workers=10, using_mp=False):
     """Upload to S3 normally or with multipart upload, as appropriate."""
     if size < mpu_threshold:
         # Normal upload
@@ -272,7 +272,7 @@ def s3_upload(
     conn = b.connection
     cb(0, size)
     try:
-        if mp is not None:
+        if using_mp:
             # if we have multiprocessing, do the upload in parallel
             conn_args = {
                 "aws_access_key_id": conn.aws_access_key_id,
@@ -299,7 +299,7 @@ def s3_upload(
 
     # finish or abort
     except:
-        if mp is not None:
+        if using_mp:
             P.terminate()
             P.join()
         sys.stdout.write("\nABORTING MULTIPART UPLOAD...\n")
@@ -307,7 +307,7 @@ def s3_upload(
         sys.stdout.write("\nMULTIPART UPLOAD ABORTED\n")
         raise
     else:
-        if mp is not None:
+        if using_mp:
             P.close()
             P.join()
         mpu.complete_upload()
@@ -453,7 +453,8 @@ def main():
         type=int,
         help=(
             'If multiprocessing is available, the number of workers to have '
-            'in the multiprocessing process pool.'
+            'in the multiprocessing process pool.  If set to 0, '
+            'multiprocessing will not be used, even if available.'
             )
         )
     parser.add_argument(
@@ -544,6 +545,7 @@ def main():
         chunk_size = int(args.chunk_size) * 1024 ** 2
         mpu_threshold = int(args.mpu_threshold) * 1024 ** 2
         workers = int(args.workers)
+        using_mp = True if (mp is not None and workers > 0) else False
         preserve = args.preserve
         no_overwrite = args.no_overwrite
         glob = args.glob
@@ -827,7 +829,8 @@ def main():
                                 encrypt_key=encrypt,
                                 chunk_size=chunk_size,
                                 mpu_threshold=mpu_threshold,
-                                workers=workers
+                                workers=workers,
+                                using_mp=using_mp
                                 )
                         keys[key_name] = file_size
                         
@@ -942,7 +945,8 @@ def main():
                             policy=grant, reduced_redundancy=reduced,
                             encrypt_key=encrypt,
                             chunk_size=chunk_size, mpu_threshold=mpu_threshold,
-                            workers=workers
+                            workers=workers,
+                            using_mp=using_mp
                             )
                     
                     # Clean stdout
