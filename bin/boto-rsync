@@ -28,6 +28,7 @@ from fnmatch import fnmatch
 from contextlib import closing
 from cStringIO import StringIO
 import boto
+from boto.s3.connection import OrdinaryCallingFormat, SubdomainCallingFormat
 
 try:
     # Python >= 2.6
@@ -281,6 +282,7 @@ def s3_upload(
                 "is_secure": conn.is_secure,
                 "port": conn.port,
                 "debug": conn.debug,
+                "calling_format": conn.calling_format,
                 }
 
             P = mp.Pool(
@@ -407,6 +409,20 @@ def main():
         '--endpoint', metavar='HOST', default='objects.dreamhost.com',
         help='Specify a specific S3 endpoint to connect to via boto\'s ' + \
              '"host" connection argument (S3 only).'
+        )
+    parser.add_argument(
+        '--port', metavar='N', default=None, type=int,
+        help='Port number, default is the boto default'
+        )
+    parser.add_argument(
+        '--secure', metavar='N', default=1, type=int,
+        help='1 or 0 for https or not, default = 1'
+        )
+    parser.add_argument(
+        '--calling-format', metavar='FORMAT', dest='calling_format_name',
+        default='subdomain',
+        help='ordinary or subdomain, sets OrdinaryCallingFormat or ' + \
+             'SubdomainCallingFormat, default is subdomain'
         )
     parser.add_argument(
         '-g', '--grant',
@@ -536,6 +552,9 @@ def main():
         cloud_secret_access_key = args.cloud_secret_access_key
         anon = args.anon
         endpoint = args.endpoint
+        port = args.port
+        is_secure = args.secure
+        calling_format_name = args.calling_format_name
         grant = args.grant
         metadata = args.metadata
         if not isinstance(metadata, dict):
@@ -645,12 +664,25 @@ def main():
         c = boto.connect_gs(gs_access_key_id=cloud_access_key_id,
                             gs_secret_access_key=cloud_secret_access_key)
     else:
+        if calling_format_name == 'ordinary':
+            calling_format = OrdinaryCallingFormat()
+        elif calling_format_name == 'subdomain':
+            calling_format = SubdomainCallingFormat()
+        else:
+            sys.stdout.write(
+                '\nERROR: %s is not a valid --calling-format value\n\n' %
+                    calling_format_name
+                )
+            usage(parser)
+
         if anon:
-            c = boto.connect_s3(host=endpoint, anon=True)
+            c = boto.connect_s3(host=endpoint, port=port, is_secure=is_secure,
+                                calling_format=calling_format, anon=True)
         else:
             c = boto.connect_s3(aws_access_key_id=cloud_access_key_id,
                                 aws_secret_access_key=cloud_secret_access_key,
-                                host=endpoint)
+                                host=endpoint, port=port, is_secure=is_secure,
+                                calling_format=calling_format)
     c.debug = debug
     b = c.get_bucket(cloud_bucket)
     if xfer_type in ['sync']:
