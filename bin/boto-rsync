@@ -28,7 +28,7 @@ from fnmatch import fnmatch
 from contextlib import closing
 from cStringIO import StringIO
 import boto
-from boto.s3.connection import OrdinaryCallingFormat, SubdomainCallingFormat
+from boto.s3.connection import OrdinaryCallingFormat, SubdomainCallingFormat, ProtocolIndependentOrdinaryCallingFormat, VHostCallingFormat
 
 try:
     # Python >= 2.6
@@ -418,11 +418,13 @@ def main():
         '--secure', metavar='N', default=1, type=int,
         help='1 or 0 for https or not, default = 1'
         )
+    valid_calling_formats = ['ordinary', 'subdomain'] + filter(lambda x: x.endswith('CallingFormat'), globals().keys())
     parser.add_argument(
         '--calling-format', metavar='FORMAT', dest='calling_format_name',
+        choices=valid_calling_formats,
         default='subdomain',
-        help='ordinary or subdomain, sets OrdinaryCallingFormat or ' + \
-             'SubdomainCallingFormat, default is subdomain'
+        help='Set the S3 calling format, default is subdomain. Must be one of: ' + \
+                (', '.join(valid_calling_formats))
         )
     parser.add_argument(
         '-g', '--grant',
@@ -664,10 +666,14 @@ def main():
         c = boto.connect_gs(gs_access_key_id=cloud_access_key_id,
                             gs_secret_access_key=cloud_secret_access_key)
     else:
-        if calling_format_name == 'ordinary':
+        if calling_format_name in ['ordinary', 'OrdinaryCallingFormat']:
             calling_format = OrdinaryCallingFormat()
-        elif calling_format_name == 'subdomain':
+        elif calling_format_name in ['subdomain', 'SubdomainCallingFormat']:
             calling_format = SubdomainCallingFormat()
+        elif calling_format_name in ['ProtocolIndependentOrdinaryCallingFormat']:
+            calling_format = ProtocolIndependentOrdinaryCallingFormat()
+        elif calling_format_name in ['VHostCallingFormat']:
+            calling_format = VHostCallingFormat()
         else:
             sys.stdout.write(
                 '\nERROR: %s is not a valid --calling-format value\n\n' %
